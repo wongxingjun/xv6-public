@@ -38,15 +38,18 @@ allocproc(void)
   char *sp;
 
   acquire(&ptable.lock);
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == UNUSED)
       goto found;
+
   release(&ptable.lock);
   return 0;
 
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -55,11 +58,11 @@ found:
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
-  
+
   // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
-  
+
   // Set up new context to start executing at forkret,
   // which returns to trapret.
   sp -= 4;
@@ -80,8 +83,9 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-  
+
   p = allocproc();
+  
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -99,7 +103,15 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  // this assignment to p->state lets other cores
+  // run this process. the acquire forces the above
+  // writes to be visible, and the lock is also needed
+  // because the assignment might not be atomic.
+  acquire(&ptable.lock);
+
   p->state = RUNNABLE;
+
+  release(&ptable.lock);
 }
 
 // Grow current process's memory by n bytes.
@@ -108,7 +120,7 @@ int
 growproc(int n)
 {
   uint sz;
-  
+
   sz = proc->sz;
   if(n > 0){
     if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
@@ -132,8 +144,9 @@ fork(void)
   struct proc *np;
 
   // Allocate process.
-  if((np = allocproc()) == 0)
+  if((np = allocproc()) == 0){
     return -1;
+  }
 
   // Copy process state from p.
   if((np->pgdir = copyuvm(proc->pgdir, proc->sz)) == 0){
@@ -155,14 +168,15 @@ fork(void)
   np->cwd = idup(proc->cwd);
 
   safestrcpy(np->name, proc->name, sizeof(proc->name));
- 
+
   pid = np->pid;
 
-  // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
+
   np->state = RUNNABLE;
+
   release(&ptable.lock);
-  
+
   return pid;
 }
 
@@ -221,7 +235,7 @@ wait(void)
 
   acquire(&ptable.lock);
   for(;;){
-    // Scan through table looking for zombie children.
+    // Scan through table looking for exited children.
     havekids = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->parent != proc)
@@ -233,11 +247,11 @@ wait(void)
         kfree(p->kstack);
         p->kstack = 0;
         freevm(p->pgdir);
-        p->state = UNUSED;
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
+        p->state = UNUSED;
         release(&ptable.lock);
         return pid;
       }
@@ -283,7 +297,7 @@ scheduler(void)
       proc = p;
       switchuvm(p);
       p->state = RUNNING;
-      swtch(&cpu->scheduler, proc->context);
+      swtch(&cpu->scheduler, p->context);
       switchkvm();
 
       // Process is done running for now.
@@ -296,7 +310,12 @@ scheduler(void)
 }
 
 // Enter scheduler.  Must hold only ptable.lock
-// and have changed proc->state.
+// and have changed proc->state. Saves and restores
+// intena because intena is a property of this
+// kernel thread, not this CPU. It should
+// be proc->intena and proc->ncli, but that would
+// break in the few places where a lock is held but
+// there's no process.
 void
 sched(void)
 {
@@ -336,13 +355,13 @@ forkret(void)
 
   if (first) {
     // Some initialization functions must be run in the context
-    // of a regular process (e.g., they call sleep), and thus cannot 
+    // of a regular process (e.g., they call sleep), and thus cannot
     // be run from main().
     first = 0;
     iinit(ROOTDEV);
     initlog(ROOTDEV);
   }
-  
+
   // Return to "caller", actually trapret (see allocproc).
 }
 
@@ -447,7 +466,7 @@ procdump(void)
   struct proc *p;
   char *state;
   uint pc[10];
-  
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;
